@@ -73,8 +73,21 @@ defmodule Mix.Tasks.Compile.Crank do
 
     view = View.refresh(user_apps(), Keyword.take(opts, [:force]))
 
-    boundary_errors = Boundary.errors(view, CompilerState.references())
-    crank_diagnostics = translate_errors(boundary_errors, view)
+    references = CompilerState.references() |> Enum.to_list()
+    boundary_errors = Boundary.errors(view, references)
+
+    {dep_002_diagnostics, suppressed_unclassified} =
+      detect_unmarked_helpers(boundary_errors, references)
+
+    remaining_errors =
+      Enum.reject(boundary_errors, fn
+        {:unclassified_module, mod} -> mod in suppressed_unclassified
+        _ -> false
+      end)
+
+    crank_diagnostics =
+      (translate_errors(remaining_errors, view) ++ dep_002_diagnostics)
+      |> Enum.sort_by(&{&1.file || "", &1.position || 0})
 
     print_diagnostics(crank_diagnostics)
 
@@ -88,6 +101,64 @@ defmodule Mix.Tasks.Compile.Crank do
   end
 
   defp after_app(other, _opts), do: other
+
+  # ── CRANK_DEP_002 — unmarked first-party helper called from a Crank domain ──
+
+  # Walks the Boundary `:unclassified_module` errors against the references
+  # graph. For each unclassified helper that a Crank-domain module calls,
+  # emits a CRANK_DEP_002 diagnostic and consumes the underlying
+  # `:unclassified_module` error so it isn't double-reported.
+  defp detect_unmarked_helpers(boundary_errors, references) do
+    unclassified =
+      for {:unclassified_module, mod} <- boundary_errors,
+          do: mod,
+          into: MapSet.new()
+
+    crank_domain_modules = compute_crank_domains(references)
+
+    diagnostics =
+      for ref <- references,
+          MapSet.member?(unclassified, Map.get(ref, :to)),
+          MapSet.member?(crank_domain_modules, Map.get(ref, :from)),
+          do:
+            ref
+            |> Map.get(:to)
+            |> Crank.BoundaryIntegration.translate_unclassified(ref)
+            |> diagnostic_from_violation()
+
+    suppressed =
+      diagnostics
+      |> Enum.map(fn diag -> diag.details.violating_call.module end)
+      |> MapSet.new()
+
+    {diagnostics, suppressed}
+  end
+
+  # The set of modules tagged with the `__crank_domain__` persisted
+  # attribute (set by both `use Crank` and `use Crank.Domain.Pure`).
+  # Read at this point because the `:from` modules in the references
+  # graph are guaranteed loaded — they came from the just-completed
+  # compile.
+  defp compute_crank_domains(references) do
+    references
+    |> Enum.map(&Map.get(&1, :from))
+    |> Enum.uniq()
+    |> Enum.filter(&crank_domain_module?/1)
+    |> MapSet.new()
+  end
+
+  defp crank_domain_module?(module) when is_atom(module) do
+    Code.ensure_loaded?(module) and
+      function_exported?(module, :__info__, 1) and
+      module.__info__(:attributes)
+      |> Keyword.get(:__crank_domain__, [])
+      |> List.wrap()
+      |> Enum.member?(true)
+  rescue
+    _ -> false
+  end
+
+  defp crank_domain_module?(_), do: false
 
   defp final_status([], _opts), do: :ok
 

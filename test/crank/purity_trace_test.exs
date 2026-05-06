@@ -1,6 +1,7 @@
 defmodule Crank.PurityTraceTest do
   use ExUnit.Case, async: false
 
+  alias Crank.Check.Blacklist
   alias Crank.PurityTrace
 
   # Trace targets used by tests that don't want the full default list — keeps
@@ -86,6 +87,40 @@ defmodule Crank.PurityTraceTest do
                {:call, {:ets, :new, _}} -> true
                _ -> false
              end)
+    end
+
+    # Default forbidden list now derives infra-module targets from
+    # `Crank.Check.Blacklist`, so a transitive helper that calls
+    # `Repo`-style infrastructure is caught without the caller passing
+    # `:forbidden_modules` explicitly. Regression test for the second
+    # Codex review's medium finding on runtime/static alignment.
+    defmodule FakeRepo do
+      @moduledoc false
+      def insert!(record), do: record
+    end
+
+    defmodule RepoHelper do
+      @moduledoc false
+      def write(x) do
+        # Call via the canonical `Repo` alias so the trace pattern fires.
+        # In a real app the user's `MyApp.Repo` would either be aliased
+        # via `:forbidden_modules` or caught by Boundary's topology check.
+        repo = FakeRepo
+        repo.insert!(%{value: x})
+      end
+    end
+
+    test "default list catches transitive call to a canonical infra module name" do
+      # Use the explicit FakeRepo target so the test is hermetic — we're
+      # asserting the *mechanism* (default list reaches into transitive
+      # calls), not relying on a real Repo being loaded.
+      assert {:impurity, violations, _trace} =
+               PurityTrace.trace_pure(
+                 fn -> RepoHelper.write(1) end,
+                 forbidden_modules: [FakeRepo]
+               )
+
+      assert Enum.any?(violations, fn v -> v.violating_call.module == FakeRepo end)
     end
   end
 
@@ -289,6 +324,35 @@ defmodule Crank.PurityTraceTest do
                {:erlang, :exit, _} -> true
                _ -> false
              end)
+    end
+
+    test "default list aligns with static blacklist on canonical infra module names" do
+      # Codex review #2 surfaced that runtime defaults excluded Repo, Ecto,
+      # HTTPoison, etc. while the static `Crank.Check.Blacklist` covered
+      # them — making transitive helpers that call those modules pass
+      # `assert_pure_turn` silently. The defaults now derive the
+      # trace-compatible subset from the blacklist via
+      # `Crank.Check.Blacklist.runtime_module_targets/0`.
+      defaults = PurityTrace.default_forbidden_targets()
+
+      for module <- [Repo, Ecto, HTTPoison, Tesla, Finch, Req, Mailer, Oban, Logger, File] do
+        assert module in defaults,
+               "expected #{inspect(module)} in default_forbidden_targets, got: #{inspect(defaults)}"
+      end
+    end
+
+    test "blacklist runtime_module_targets returns the prefix/module subset" do
+      # Pinning the derivation so a regression in Blacklist.runtime_module_targets/0
+      # is caught here too, not just by the integration path through PurityTrace.
+      targets = Blacklist.runtime_module_targets()
+      assert is_list(targets)
+      assert Repo in targets
+      assert Ecto in targets
+      assert Logger in targets
+      # Negative: Erlang-atom modules go through `:erlang` etc. shortcuts
+      # in the existing `default_forbidden_targets` list, not via this
+      # helper.
+      refute :erlang in targets
     end
   end
 

@@ -114,10 +114,51 @@ defmodule Crank.BoundaryIntegration do
   end
 
   def translate_error({:unclassified_module, _module} = tuple, _opts) do
+    # Per-error translator can't decide CRANK_DEP_002 alone — it needs
+    # the references graph to know whether a Crank-domain module called
+    # this unclassified helper. The Mix compiler task does the lookup
+    # and calls `translate_unclassified/2` directly when it finds a
+    # matching reference.
     {:passthrough, tuple}
   end
 
   def translate_error(other, _opts), do: {:passthrough, other}
+
+  @doc """
+  Builds a `CRANK_DEP_002` violation for an unclassified first-party
+  helper that was referenced from a Crank-domain module.
+
+  `helper` is the unclassified module. `domain_reference` is one entry
+  from `Boundary.Mix.CompilerState.references()` (a `Boundary.ref()`
+  map) where `from` is a Crank-domain module and `to` is `helper`.
+
+  Returns a `Crank.Errors.Violation` ready to be wrapped in a
+  `Mix.Task.Compiler.Diagnostic`.
+  """
+  @spec translate_unclassified(module(), Boundary.ref()) :: Errors.Violation.t()
+  def translate_unclassified(helper, domain_reference) when is_atom(helper) and is_map(domain_reference) do
+    Errors.build("CRANK_DEP_002",
+      location: %{
+        file: Map.get(domain_reference, :file),
+        line: Map.get(domain_reference, :line),
+        column: nil,
+        function:
+          case Map.get(domain_reference, :from_function) do
+            {fun, arity} -> "#{fun}/#{arity}"
+            _ -> nil
+          end
+      },
+      violating_call: %{module: helper, function: nil, arity: nil},
+      context:
+        "Crank-domain module #{inspect(Map.get(domain_reference, :from))} references unmarked first-party helper #{inspect(helper)}. " <>
+          "Mark the helper with `use Crank.Domain.Pure` (or add it to a Boundary).",
+      metadata: %{
+        helper: helper,
+        from: Map.get(domain_reference, :from),
+        ref_type: Map.get(domain_reference, :type)
+      }
+    )
+  end
 
   @doc """
   Classifies the OTP app a module belongs to against the configured

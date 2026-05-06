@@ -178,6 +178,25 @@ Each entry is `{module, function, arity, opts}`; `:_` matches any value. The `:r
 
 Layer C suppressions are scoped per-call. They do not leak into other tests, do not modify global state, and emit `[:crank, :suppression]` telemetry so projects can audit how often each suppression fires.
 
+## Aliased infra modules (`MyApp.Repo`, `MyApp.Mailer`, …)
+
+The default `:forbidden_modules` list is derived from `Crank.Check.Blacklist` and covers the canonical names (`Repo`, `Ecto`, `HTTPoison`, `Tesla`, `Finch`, `Req`, `Swoosh`, `Bamboo`, `Mailer`, `Oban`, `Logger`, `File`). If your app uses an aliased module (`MyApp.Repo` instead of `Repo`), the runtime trace doesn't see it by default — trace patterns are per-loaded-module-atom, not name-prefix.
+
+Two ways to close this gap:
+
+1. **Rely on Boundary** (preferred). Configure `:third_party_impure` in your project's `:boundary` keyword. Boundary's compile-time check rejects domain → `MyApp.Repo` references topologically, so the runtime trace doesn't have to catch every site.
+
+2. **Extend the runtime list per test**:
+
+```elixir
+Crank.PropertyTest.assert_pure_turn(machine, events,
+  forbidden_modules:
+    Crank.PurityTrace.default_forbidden_targets() ++ [MyApp.Repo, MyApp.Mailer]
+)
+```
+
+The static call-site checks (`Crank.Check.TurnPurity` and `Crank.Check.CompileTime`) match by string-prefix, so they catch `MyApp.Repo` without configuration. Only the runtime layer needs the explicit aliasing.
+
 ## Resource limits
 
 `assert_pure_turn/3` runs the worker with a heap cap and a timeout. Defaults: 10MB heap, 1000ms timeout. Override per call:

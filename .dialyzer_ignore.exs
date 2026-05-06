@@ -14,6 +14,7 @@
   {"lib/crank/suppressions.ex", :call_without_opaque},
   {"lib/crank/purity_trace.ex", :call_without_opaque},
   {"lib/crank/errors/catalog.ex", :call_without_opaque},
+  {"lib/mix/tasks/compile/crank.ex", :call_without_opaque},
   # The trace worker's body always ends with `exit/1` — that's intentional
   # (the exit reason carries the trace result back to the caller).
   {"lib/crank/purity_trace.ex", :no_return}

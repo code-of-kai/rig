@@ -237,4 +237,53 @@ defmodule Crank.BoundaryIntegrationTest do
       assert BoundaryIntegration.classify_app(:foo, :my_app, %{}) == :third_party_unclassified
     end
   end
+
+  describe "translate_unclassified/2 — CRANK_DEP_002" do
+    test "produces a CRANK_DEP_002 violation with all required fields populated" do
+      ref = %{
+        from: BoundaryIntegrationTest.CallingDomain,
+        to: BoundaryIntegrationTest.UnmarkedHelper,
+        from_function: {:turn, 3},
+        type: :call,
+        mode: :runtime,
+        file: "lib/calling_domain.ex",
+        line: 17
+      }
+
+      violation =
+        BoundaryIntegration.translate_unclassified(BoundaryIntegrationTest.UnmarkedHelper, ref)
+
+      assert %Violation{} = violation
+      assert violation.code == "CRANK_DEP_002"
+      assert violation.severity == :error
+      assert violation.rule == :unmarked_domain_helper
+      assert violation.location.file == "lib/calling_domain.ex"
+      assert violation.location.line == 17
+      assert violation.location.function == "turn/3"
+      assert violation.violating_call.module == BoundaryIntegrationTest.UnmarkedHelper
+      assert violation.context =~ "CallingDomain"
+      assert violation.context =~ "UnmarkedHelper"
+      assert violation.context =~ "use Crank.Domain.Pure"
+      assert violation.metadata.helper == BoundaryIntegrationTest.UnmarkedHelper
+      assert violation.metadata.from == BoundaryIntegrationTest.CallingDomain
+      assert violation.metadata.ref_type == :call
+    end
+
+    test "tolerates a reference missing from_function" do
+      ref = %{
+        from: SomeDomain,
+        to: SomeHelper,
+        from_function: nil,
+        type: :alias_reference,
+        mode: :compile,
+        file: "lib/some_domain.ex",
+        line: 3
+      }
+
+      violation = BoundaryIntegration.translate_unclassified(SomeHelper, ref)
+
+      assert violation.code == "CRANK_DEP_002"
+      assert violation.location.function == nil
+    end
+  end
 end

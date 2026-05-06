@@ -108,6 +108,13 @@ defmodule Crank do
     quote location: :keep do
       @behaviour Crank
 
+      # Persistent marker (Mix.Tasks.Compile.Crank reads this via
+      # `module.__info__(:attributes)`) so the topology post-processor
+      # can identify Crank-domain modules and emit `CRANK_DEP_002` for
+      # references into unclassified first-party helpers.
+      Module.register_attribute(__MODULE__, :__crank_domain__, persist: true)
+      @__crank_domain__ true
+
       # Topology layer (Phase 1.4): tag this module as a `:domain` Boundary
       # so the post-compile graph check (via `Mix.Tasks.Compile.Crank` →
       # Boundary) rejects cross-boundary references to infrastructure modules.

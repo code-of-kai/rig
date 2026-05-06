@@ -125,6 +125,7 @@ defmodule Crank.PurityTrace do
   baseline at boot via `CRANK_SETUP_002`.
   """
 
+  alias Crank.Check.Blacklist
   alias Crank.Errors
   alias Crank.PurityTrace.Coordinator
 
@@ -223,9 +224,14 @@ defmodule Crank.PurityTrace do
   worker's own lifecycle traffic. Those are caught by the static checks
   (`CRANK_PURITY_005`) at compile time.
 
-  Repo, Ecto, HTTP, and other application-specific modules are not in the
-  default list — pass them via `:forbidden_modules` from the test that
-  knows the application's surface.
+  Application-named infrastructure modules (Repo, Ecto, HTTPoison, Tesla,
+  Finch, Req, Swoosh, Bamboo, Mailer, Oban, etc.) are derived from
+  `Crank.Check.Blacklist.runtime_module_targets/0` and merged into the
+  default list, so the static and runtime layers agree on canonical
+  infra names. User-aliased names (`MyApp.Repo`) are NOT covered by
+  default — pass them via `:forbidden_modules` from the test that
+  knows the application's surface, or rely on Boundary's topology
+  check for that case.
   """
   @spec default_forbidden_targets() :: [forbidden_target()]
   def default_forbidden_targets do
@@ -275,16 +281,15 @@ defmodule Crank.PurityTrace do
       # Atom-table mutation (CRANK_PURITY_006)
       {String, :to_atom, :_},
       {:erlang, :list_to_atom, :_},
-      {:erlang, :binary_to_atom, :_},
-
-      # Identity reads (CRANK_PURITY_004) — make_ref only; self/0 and node/0
-      # are routinely called by infrastructure so live in the static list only.
-      {Kernel, :make_ref, 0},
-      {:erlang, :make_ref, 0},
-
-      # Logger (CRANK_PURITY_003)
-      Logger
-    ]
+      {:erlang, :binary_to_atom, :_}
+    ] ++
+      [
+        # Identity reads (CRANK_PURITY_004) — make_ref only; self/0 and node/0
+        # are routinely called by infrastructure so live in the static list only.
+        {Kernel, :make_ref, 0},
+        {:erlang, :make_ref, 0}
+      ] ++
+      Blacklist.runtime_module_targets()
   end
 
   # ── Worker process ────────────────────────────────────────────────────────

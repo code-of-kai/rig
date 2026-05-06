@@ -185,6 +185,43 @@ defmodule Crank.Check.Blacklist do
   @spec count() :: non_neg_integer()
   def count, do: @entry_count
 
+  # Resolve the runtime-traceable modules at compile time so this is a
+  # constant-time lookup. Only `:module` and `:prefix` matchers
+  # contribute — MFA matchers are already covered by the existing
+  # `default_forbidden_targets/0` list, and `:erlang`/`:special_form`
+  # matchers either map to atoms already in that list or aren't
+  # traceable. Sub-namespaces (e.g. `Ecto.Query`) need to be loaded
+  # for their own trace patterns to fire; we commit to the canonical
+  # atoms here and let users extend via `:forbidden_modules` for
+  # specific submodule coverage.
+  @runtime_module_targets (Enum.map(@entries, fn
+                             %{matcher: {:module, name}} -> Module.concat([name])
+                             %{matcher: {:prefix, name}} -> Module.concat([name])
+                             _ -> nil
+                           end)
+                           |> Enum.reject(&is_nil/1)
+                           |> Enum.uniq())
+
+  @doc """
+  Returns the subset of blacklist entries whose matchers can be expressed
+  as `:trace.function/4` patterns at runtime.
+
+  The static blacklist matches AST nodes by string-prefix
+  (`{:prefix, "Ecto"}`) and string-name (`{:module, "Repo"}`); those
+  representations work for compile-time AST analysis but not for the
+  BEAM trace API, which requires concrete module atoms. This function
+  derives the trace-compatible subset so `Crank.PurityTrace`'s default
+  forbidden list stays aligned with the static layer's policy.
+
+  **Caveat:** prefix-matched infra modules with user-aliased names
+  (`MyApp.Repo`) are not covered by this default — only the canonical
+  module name (`Repo`, `Ecto`, etc.). Boundary catches the topology
+  side; users who need runtime tracing of aliased modules pass them
+  via `:forbidden_modules`.
+  """
+  @spec runtime_module_targets() :: [module()]
+  def runtime_module_targets, do: @runtime_module_targets
+
   @doc """
   Checks whether a remote call AST node matches any blacklist entry.
 

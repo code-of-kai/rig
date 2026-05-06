@@ -62,6 +62,13 @@ defmodule Crank.Domain.Pure do
     boundary_opts = build_boundary_opts(opts)
 
     quote location: :keep do
+      # Persistent topology marker. `Mix.Tasks.Compile.Crank` reads this
+      # via `module.__info__(:attributes)` to identify Crank-domain
+      # modules and emit `CRANK_DEP_002` when they reference unclassified
+      # first-party helpers.
+      Module.register_attribute(__MODULE__, :__crank_domain__, persist: true)
+      @__crank_domain__ true
+
       use Boundary, unquote(boundary_opts)
 
       Module.put_attribute(__MODULE__, :__crank_domain_pure__, true)
