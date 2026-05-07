@@ -175,6 +175,72 @@ defmodule Crank.Server.TurnsTest do
     # under that 5x budget. Liberal threshold (200ms total for 5
     # steps == 40ms/step ceiling) absorbs CI jitter while still
     # catching a per-step latency-tax regression.
+    # Codex review #6 (2026-05-07): the 25ms `check_for_down/1`
+    # window can miss a `:DOWN` under extreme scheduler pressure.
+    # The proper v2.1 fix is the reply-contract change tracked in
+    # ROADMAP. For v2.0.x we add observability — `drain_late_down/1`
+    # peeks the mailbox between turns and emits telemetry on any
+    # `:DOWN` we missed in `check_for_down/1`.
+    test "drain_late_down/1 emits :late_down telemetry for pre-arrayed :DOWN" do
+      handler_id = "test-late-down-#{System.unique_integer()}"
+      parent = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:crank, :server_turns, :late_down],
+        fn _name, _measurements, metadata, _config ->
+          send(parent, {:late_down_telemetry, metadata})
+        end,
+        nil
+      )
+
+      try do
+        # Drive the drain hermetically: a controlled `ref_steps` map
+        # plus a pre-arrayed `:DOWN` message in our own mailbox.
+        # Real scheduler-pressure misses produce the same shape.
+        fake_ref = make_ref()
+        fake_pid = self()
+        send(self(), {:DOWN, fake_ref, :process, fake_pid, :synthetic_stop})
+
+        ServerTurns.drain_late_down(%{
+          fake_ref => %{step: :previous_step, server: fake_pid}
+        })
+
+        assert_receive {:late_down_telemetry, metadata}, 100
+        assert metadata.step == :previous_step
+        assert metadata.reason == :synthetic_stop
+        assert metadata.ref == fake_ref
+      after
+        :telemetry.detach(handler_id)
+      end
+    end
+
+    test "drain_late_down/1 is a no-op when no late :DOWN is queued" do
+      handler_id = "test-late-down-noop-#{System.unique_integer()}"
+      parent = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:crank, :server_turns, :late_down],
+        fn _name, _measurements, _metadata, _config ->
+          send(parent, :unexpected_telemetry)
+        end,
+        nil
+      )
+
+      try do
+        fake_ref = make_ref()
+
+        ServerTurns.drain_late_down(%{
+          fake_ref => %{step: :prev, server: self()}
+        })
+
+        refute_receive :unexpected_telemetry, 50
+      after
+        :telemetry.detach(handler_id)
+      end
+    end
+
     test "happy-path multi-step does not pay a per-step latency tax" do
       vm = start_server!(VendingMachine, price: 100)
 

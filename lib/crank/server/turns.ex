@@ -98,19 +98,28 @@ defmodule Crank.Server.Turns do
   @spec apply(Turns.t(), timeout()) :: apply_result()
   def apply(%Turns{} = turns, timeout \\ 5_000) do
     steps = Turns.to_list(turns)
-    do_apply(steps, %{}, %{}, timeout)
+    do_apply(steps, %{}, %{}, %{}, timeout)
   end
 
   # ──────────────────────────────────────────────────────────────────────────
   # Core loop
   # ──────────────────────────────────────────────────────────────────────────
 
-  defp do_apply([], results, monitors, _timeout) do
+  defp do_apply([], results, monitors, _ref_steps, _timeout) do
     demonitor_all(monitors)
     {:ok, results}
   end
 
-  defp do_apply([{name, machine_res, event_res} | rest], results, monitors, timeout) do
+  defp do_apply([{name, machine_res, event_res} | rest], results, monitors, ref_steps, timeout) do
+    # Drain any late `:DOWN` for refs we already saw alive. The
+    # 25ms window in `check_for_down/1` covers the common case;
+    # under heavy scheduler load `:DOWN` can land between turns.
+    # Catching it here doesn't change attribution (the proper fix
+    # is the v2.1 reply-contract change tracked in ROADMAP) but
+    # emits `[:crank, :server_turns, :late_down]` telemetry so
+    # projects can quantify residual race rate.
+    drain_late_down(ref_steps)
+
     server = resolve(machine_res, results)
     validate_server!(server, name)
     event = resolve(event_res, results)
@@ -123,7 +132,8 @@ defmodule Crank.Server.Turns do
         nil ->
           # Server is alive (or any :DOWN for it arrives beyond the window,
           # which would only happen for causes unrelated to this turn).
-          do_apply(rest, Map.put(results, name, reading), monitors, timeout)
+          ref_steps = Map.put(ref_steps, ref, %{step: name, server: server})
+          do_apply(rest, Map.put(results, name, reading), monitors, ref_steps, timeout)
 
         reason ->
           # Turn delivered the reading, but the server stopped as a
@@ -137,6 +147,35 @@ defmodule Crank.Server.Turns do
         demonitor_all(monitors)
         {:error, name, {:server_exit, exit_reason}, results}
     end
+  end
+
+  @doc """
+  Non-blocking peek for `:DOWN` messages keyed by refs we've already
+  observed alive. Each match emits one
+  `[:crank, :server_turns, :late_down]` telemetry event; the message
+  is consumed so it doesn't leak past `apply/1` even if the caller
+  doesn't drain its mailbox afterward.
+
+  Public so tests can drive the drain hermetically with a controlled
+  `ref_steps` map and a pre-arrayed `:DOWN` message; in production
+  it's only called by `do_apply/5` between turns.
+  """
+  @spec drain_late_down(%{reference() => %{step: atom(), server: term()}}) :: :ok
+  def drain_late_down(ref_steps) when ref_steps == %{}, do: :ok
+
+  def drain_late_down(ref_steps) do
+    Enum.each(ref_steps, fn {ref, %{step: step, server: server}} ->
+      receive do
+        {:DOWN, ^ref, _, _, reason} ->
+          :telemetry.execute(
+            [:crank, :server_turns, :late_down],
+            %{},
+            %{step: step, server: server, reason: reason, ref: ref}
+          )
+      after
+        0 -> :ok
+      end
+    end)
   end
 
   # ──────────────────────────────────────────────────────────────────────────
