@@ -680,6 +680,48 @@ defmodule Crank.Server.TurnsTest do
       end
     end
 
+    # Codex review #12 (2026-05-08): the previous fix put
+    # save-restore in the after-block; if drain/flush raised,
+    # restoration was skipped. Mitigations are layered:
+    # (a) nested `try/after` so restore is unconditional even if
+    #     drain/flush raises
+    # (b) `sanitize_ref_steps/1` on reads (in both drain and
+    #     `track_ref/3`) so corrupted slot values don't propagate
+    #     into Map operations
+    # The "drain itself raises" path isn't reachable in practice
+    # because :telemetry catches handler exceptions internally and
+    # our drain/flush code is plain BEAM ops. The nested try/after
+    # is defense-in-depth; we don't have a hermetic regression for
+    # it. The corruption-during-run path IS testable — see below.
+    test "corrupted slot during apply is treated as empty (graceful degradation)" do
+      name = :"crank_turns_corrupt_slot_#{System.unique_integer([:positive])}"
+      {:ok, pid} = Crank.Server.start_link(SimpleEcho, [], name: name)
+
+      try do
+        # The resolver corrupts the slot mid-apply. The fix's
+        # `sanitize_ref_steps/1` should treat the non-map value as
+        # empty, drain & flush become no-ops, restore proceeds.
+        {:ok, _results} =
+          Turns.new()
+          |> Turns.turn(:a, name, :tick)
+          |> Turns.turn(
+            :b,
+            fn _ ->
+              Process.put({Crank.Server.Turns, :ref_steps}, :not_a_map)
+              name
+            end,
+            :tick
+          )
+          |> ServerTurns.apply()
+
+        # No crash, slot was restored to the original prev (nil at
+        # top-level), so cleared.
+        assert Process.get({Crank.Server.Turns, :ref_steps}) == nil
+      after
+        Crank.Server.stop(pid)
+      end
+    end
+
     test "process dict key is cleared after apply returns" do
       # Sanity check: the apply-scoped process-dict slot doesn't
       # leak past `apply/2`. Otherwise any caller observing their

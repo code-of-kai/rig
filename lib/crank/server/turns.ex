@@ -122,12 +122,29 @@ defmodule Crank.Server.Turns do
     try do
       do_apply(steps, %{}, %{}, timeout)
     after
-      ref_steps = Process.get(@ref_steps_key, %{})
-      drain_late_down(ref_steps)
-      flush_all_refs(ref_steps)
-      restore_ref_steps_slot(prev_ref_steps)
+      # Nested `try/after` so the slot restore happens even if
+      # `drain_late_down/1` or `flush_all_refs/1` raises. Without
+      # this, a telemetry-handler exception or a corrupted slot
+      # value would leave the outer apply's slot in an inconsistent
+      # state and reintroduce the cross-call leakage class.
+      try do
+        ref_steps = sanitize_ref_steps(Process.get(@ref_steps_key))
+        drain_late_down(ref_steps)
+        flush_all_refs(ref_steps)
+      after
+        restore_ref_steps_slot(prev_ref_steps)
+      end
     end
   end
+
+  # Defensive shape check. The slot SHOULD always hold a map (set by
+  # this module's own `Process.put` calls), but resolver code runs
+  # in-process and could legitimately or accidentally
+  # `Process.put({Crank.Server.Turns, :ref_steps}, garbage)`. Treat
+  # anything non-map as "no refs to clean up" rather than crashing
+  # cleanup mid-stream.
+  defp sanitize_ref_steps(value) when is_map(value), do: value
+  defp sanitize_ref_steps(_), do: %{}
 
   defp restore_ref_steps_slot(nil), do: Process.delete(@ref_steps_key)
   defp restore_ref_steps_slot(prev), do: Process.put(@ref_steps_key, prev)
@@ -170,9 +187,12 @@ defmodule Crank.Server.Turns do
 
   # Append a ref to the in-flight ref_steps map held in the process
   # dict. Reading + writing keeps the apply-scoped accumulator
-  # accessible to the top-level `after` handler.
+  # accessible to the top-level `after` handler. Reads pass
+  # through `sanitize_ref_steps/1` so a resolver that corrupted
+  # the slot mid-run can't crash the next track_ref call — the
+  # accumulator resets to empty rather than raising BadMapError.
   defp track_ref(ref, step, server) do
-    current = Process.get(@ref_steps_key, %{})
+    current = sanitize_ref_steps(Process.get(@ref_steps_key))
     Process.put(@ref_steps_key, Map.put(current, ref, %{step: step, server: server}))
   end
 
