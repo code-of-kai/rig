@@ -134,18 +134,31 @@ defmodule Crank.Server.Turns do
     try do
       do_apply(steps, %{}, %{}, call_key, timeout)
     after
-      # Nested try/after so slot deletion is unconditional even if
-      # drain or flush raises. Drain/flush exceptions still
-      # propagate (re-raised after the delete) so callers see the
-      # actual failure.
-      try do
-        ref_steps = Process.get(slot, %{})
-        drain_late_down(ref_steps)
-        flush_all_refs(ref_steps)
-      after
-        Process.delete(slot)
-      end
+      # Cleanup is best-effort and decomposed: each of drain,
+      # flush, and slot-delete is wrapped independently so one
+      # failure doesn't block the others. The unique per-call key
+      # (see `@ref_steps_key` doc) makes accidental slot
+      # corruption structurally impossible; the per-step try-blocks
+      # here are defense-in-depth against unanticipated raises in
+      # `:trace`-related telemetry handlers or BIF edge cases. They
+      # do NOT defend against deliberate sabotage of the live slot
+      # (a resolver iterating `Process.get/0`, finding the unique
+      # key, and mutating the value) — that's out of scope per the
+      # Crank threat model. See `goals/non-goals` in
+      # `plans/purity-enforcement.md`.
+      ref_steps = Process.get(slot, %{})
+      safe_run(fn -> drain_late_down(ref_steps) end)
+      safe_run(fn -> flush_all_refs(ref_steps) end)
+      Process.delete(slot)
     end
+  end
+
+  defp safe_run(fun) do
+    fun.()
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
   end
 
   # ──────────────────────────────────────────────────────────────────────────
