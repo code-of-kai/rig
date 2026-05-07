@@ -680,33 +680,33 @@ defmodule Crank.Server.TurnsTest do
       end
     end
 
-    # Codex review #12 (2026-05-08): the previous fix put
-    # save-restore in the after-block; if drain/flush raised,
-    # restoration was skipped. Mitigations are layered:
-    # (a) nested `try/after` so restore is unconditional even if
-    #     drain/flush raises
-    # (b) `sanitize_ref_steps/1` on reads (in both drain and
-    #     `track_ref/3`) so corrupted slot values don't propagate
-    #     into Map operations
-    # The "drain itself raises" path isn't reachable in practice
-    # because :telemetry catches handler exceptions internally and
-    # our drain/flush code is plain BEAM ops. The nested try/after
-    # is defense-in-depth; we don't have a hermetic regression for
-    # it. The corruption-during-run path IS testable — see below.
-    test "corrupted slot during apply is treated as empty (graceful degradation)" do
-      name = :"crank_turns_corrupt_slot_#{System.unique_integer([:positive])}"
+    # Codex review #13 (2026-05-08): an earlier iteration's
+    # `sanitize_ref_steps/1` reset the slot to `%{}` on
+    # corruption, silently dropping refs already tracked before
+    # corruption — those monitors then leaked `:DOWN` into the
+    # caller's mailbox after apply returned. Fix: switch to
+    # per-call unique slot keys via `make_ref/0`. A resolver can't
+    # accidentally write to our slot because it can't guess the
+    # unique ref. The whole sanitize / save-restore machinery is
+    # gone — corruption resistance is now structural.
+    test "pre-existing corruption attempts on the legacy global slot do not affect cleanup" do
+      # A user could try to `Process.put({Crank.Server.Turns, :ref_steps}, garbage)`
+      # to interfere with cleanup. With per-call unique keys, that
+      # legacy slot is unrelated to any in-flight apply — the
+      # resolver writes do nothing useful or harmful.
+      name = :"crank_turns_legacy_slot_attempt_#{System.unique_integer([:positive])}"
       {:ok, pid} = Crank.Server.start_link(SimpleEcho, [], name: name)
 
       try do
-        # The resolver corrupts the slot mid-apply. The fix's
-        # `sanitize_ref_steps/1` should treat the non-map value as
-        # empty, drain & flush become no-ops, restore proceeds.
-        {:ok, _results} =
+        {:ok, results} =
           Turns.new()
           |> Turns.turn(:a, name, :tick)
           |> Turns.turn(
             :b,
             fn _ ->
+              # Legacy slot — not what apply uses anymore. The
+              # write is harmless; apply's per-call slot is
+              # untouched. Cleanup proceeds normally.
               Process.put({Crank.Server.Turns, :ref_steps}, :not_a_map)
               name
             end,
@@ -714,18 +714,23 @@ defmodule Crank.Server.TurnsTest do
           )
           |> ServerTurns.apply()
 
-        # No crash, slot was restored to the original prev (nil at
-        # top-level), so cleared.
-        assert Process.get({Crank.Server.Turns, :ref_steps}) == nil
-      after
+        assert results.a == %{count: 1}
+        assert results.b == %{count: 2}
+
         Crank.Server.stop(pid)
+        refute_receive {:DOWN, _, :process, _, _}, 200
+      after
+        # Tidy up the legacy slot the resolver poisoned.
+        Process.delete({Crank.Server.Turns, :ref_steps})
+        if Process.alive?(pid), do: Crank.Server.stop(pid)
       end
     end
 
-    test "process dict key is cleared after apply returns" do
-      # Sanity check: the apply-scoped process-dict slot doesn't
-      # leak past `apply/2`. Otherwise any caller observing their
-      # own dict would see Crank's accumulator after the call.
+    test "process dict slots are cleared after apply returns" do
+      # Sanity check: the apply-scoped per-call slots don't leak
+      # past `apply/2`. Walk the entire process dictionary and
+      # assert no key under the `Crank.Server.Turns` namespace
+      # remains.
       name = :"crank_turns_dict_cleanup_#{System.unique_integer([:positive])}"
       {:ok, pid} = Crank.Server.start_link(SimpleEcho, [], name: name)
 
@@ -735,7 +740,12 @@ defmodule Crank.Server.TurnsTest do
           |> Turns.turn(:a, name, :tick)
           |> ServerTurns.apply()
 
-        assert Process.get({Crank.Server.Turns, :ref_steps}) == nil
+        leftover_keys =
+          for {{Crank.Server.Turns, _} = key, _} <- Process.get(),
+              do: key
+
+        assert leftover_keys == [],
+               "expected no Crank.Server.Turns keys in process dict, got: #{inspect(leftover_keys)}"
       after
         Crank.Server.stop(pid)
       end

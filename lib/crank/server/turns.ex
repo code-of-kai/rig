@@ -95,74 +95,73 @@ defmodule Crank.Server.Turns do
   `{name, node}` tuple. Dependency resolvers receive the map of prior
   readings keyed by step name.
   """
-  # Process-dictionary key holding the accumulating ref_steps map
-  # for the in-flight apply. We use the process dict (sparingly,
-  # bounded to this function's lifetime) so the top-level
-  # `try/after` can read the latest state for cleanup regardless of
-  # which exception type — `:exit`, `:error`, `:throw` — escapes
-  # the recursive body. Threading state via function args alone
-  # cannot reach the after-handler when the deep recursion frame is
-  # unwound by an exception.
+  # Process-dictionary key namespace for the accumulating ref_steps
+  # map. The actual slot key is `{@ref_steps_key, call_key}` where
+  # `call_key` is a fresh `make_ref/0` per `apply/2` invocation.
   #
-  # The slot is save-restored across nested calls. A resolver
-  # function inside `do_apply/4` could call `Crank.Server.Turns.apply/2`
-  # again on the same process; without save-restore the inner call
-  # would clobber the outer accumulator and any refs the outer had
-  # already tracked would never get drained or demonitored on the
-  # outer's exit. `Process.put/2` returns the previous value, which
-  # the after-handler restores so the outer scope sees its own
-  # refs again.
+  # Why a unique per-call key:
+  #
+  # 1. **Re-entrancy.** A resolver function inside `do_apply/4` can
+  #    call `Crank.Server.Turns.apply/2` again on the same process.
+  #    Each call gets its own unique slot — no save/restore dance,
+  #    no inner clobbering the outer.
+  #
+  # 2. **Corruption resistance.** Resolver code is arbitrary. A
+  #    resolver cannot accidentally write to our slot because it
+  #    cannot guess the unique `make_ref/0` we're keying with. A
+  #    deliberately malicious resolver could iterate the process
+  #    dict and find our key, but per the Crank threat model
+  #    deliberate sabotage is out of scope (`unsafePerformIO`-
+  #    equivalents exist in every static system).
+  #
+  # 3. **No global slot to leak.** When apply/2 returns, the slot
+  #    is deleted. Nothing of ours remains in the process dict.
+  #
+  # The state has to live in the process dict (not in function
+  # args) because `try/after` cleanup needs access to it after a
+  # recursive frame has been unwound by an exception of any kind
+  # (`:exit`, `:error`, `:throw`); function locals from deep
+  # frames are gone by then.
   @ref_steps_key {__MODULE__, :ref_steps}
 
   @spec apply(Turns.t(), timeout()) :: apply_result()
   def apply(%Turns{} = turns, timeout \\ 5_000) do
     steps = Turns.to_list(turns)
-    prev_ref_steps = Process.put(@ref_steps_key, %{})
+    call_key = make_ref()
+    slot = {@ref_steps_key, call_key}
+    Process.put(slot, %{})
 
     try do
-      do_apply(steps, %{}, %{}, timeout)
+      do_apply(steps, %{}, %{}, call_key, timeout)
     after
-      # Nested `try/after` so the slot restore happens even if
-      # `drain_late_down/1` or `flush_all_refs/1` raises. Without
-      # this, a telemetry-handler exception or a corrupted slot
-      # value would leave the outer apply's slot in an inconsistent
-      # state and reintroduce the cross-call leakage class.
+      # Nested try/after so slot deletion is unconditional even if
+      # drain or flush raises. Drain/flush exceptions still
+      # propagate (re-raised after the delete) so callers see the
+      # actual failure.
       try do
-        ref_steps = sanitize_ref_steps(Process.get(@ref_steps_key))
+        ref_steps = Process.get(slot, %{})
         drain_late_down(ref_steps)
         flush_all_refs(ref_steps)
       after
-        restore_ref_steps_slot(prev_ref_steps)
+        Process.delete(slot)
       end
     end
   end
-
-  # Defensive shape check. The slot SHOULD always hold a map (set by
-  # this module's own `Process.put` calls), but resolver code runs
-  # in-process and could legitimately or accidentally
-  # `Process.put({Crank.Server.Turns, :ref_steps}, garbage)`. Treat
-  # anything non-map as "no refs to clean up" rather than crashing
-  # cleanup mid-stream.
-  defp sanitize_ref_steps(value) when is_map(value), do: value
-  defp sanitize_ref_steps(_), do: %{}
-
-  defp restore_ref_steps_slot(nil), do: Process.delete(@ref_steps_key)
-  defp restore_ref_steps_slot(prev), do: Process.put(@ref_steps_key, prev)
 
   # ──────────────────────────────────────────────────────────────────────────
   # Core loop
   # ──────────────────────────────────────────────────────────────────────────
 
-  defp do_apply([], results, _monitors, _timeout) do
+  defp do_apply([], results, _monitors, _call_key, _timeout) do
     {:ok, results}
   end
 
-  defp do_apply([{name, machine_res, event_res} | rest], results, monitors, timeout) do
+  defp do_apply([{name, machine_res, event_res} | rest], results, monitors, call_key, timeout) do
     server = resolve(machine_res, results)
     validate_server!(server, name)
     event = resolve(event_res, results)
     {ref, monitors} = ensure_monitor(server, monitors)
-    track_ref(ref, name, server)
+    track_ref(call_key, ref, name, server)
 
     try do
       reading = Crank.Server.turn(server, event, timeout)
@@ -171,7 +170,7 @@ defmodule Crank.Server.Turns do
         nil ->
           # Server is alive (or any :DOWN for it arrives beyond the window,
           # which would only happen for causes unrelated to this turn).
-          do_apply(rest, Map.put(results, name, reading), monitors, timeout)
+          do_apply(rest, Map.put(results, name, reading), monitors, call_key, timeout)
 
         reason ->
           # Turn delivered the reading, but the server stopped as a
@@ -185,15 +184,14 @@ defmodule Crank.Server.Turns do
     end
   end
 
-  # Append a ref to the in-flight ref_steps map held in the process
-  # dict. Reading + writing keeps the apply-scoped accumulator
-  # accessible to the top-level `after` handler. Reads pass
-  # through `sanitize_ref_steps/1` so a resolver that corrupted
-  # the slot mid-run can't crash the next track_ref call — the
-  # accumulator resets to empty rather than raising BadMapError.
-  defp track_ref(ref, step, server) do
-    current = sanitize_ref_steps(Process.get(@ref_steps_key))
-    Process.put(@ref_steps_key, Map.put(current, ref, %{step: step, server: server}))
+  # Append a ref to the per-call ref_steps map. The slot is keyed
+  # by `call_key` (a `make_ref/0` unique to this `apply/2`
+  # invocation), so concurrent / nested apply calls on the same
+  # process can't clobber each other.
+  defp track_ref(call_key, ref, step, server) do
+    slot = {@ref_steps_key, call_key}
+    current = Process.get(slot, %{})
+    Process.put(slot, Map.put(current, ref, %{step: step, server: server}))
   end
 
   # End-of-apply cleanup. Drains any late `:DOWN` messages that
