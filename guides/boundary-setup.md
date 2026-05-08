@@ -33,14 +33,14 @@ defmodule MyApp.MixProject do
   def project do
     [
       app: :my_app,
-      compilers: Mix.compilers() ++ [:crank],   # adds the Crank compiler stack
+      compilers: [:crank | Mix.compilers()],   # MUST prepend — see note below
       ...
     ]
   end
 
   defp deps do
     [
-      {:crank, "~> 1.2"},
+      {:crank, "~> 2.0"},
       {:boundary, "~> 0.10"},
       ...
     ]
@@ -49,6 +49,12 @@ end
 ```
 
 Adding `:crank` to `:compilers` activates the entire stack: standard compile → Boundary check → Crank's diagnostic translation. If `:crank` is missing, `mix crank.check` fails fast with `CRANK_SETUP_001` rather than letting the project silently run without topology enforcement.
+
+### Compiler order matters
+
+`:crank` MUST be prepended (or otherwise positioned BEFORE `:elixir` and `:app`) — `Mix.Tasks.Compile.Crank.run/1` registers `after_compiler(:elixir, ...)` and `after_compiler(:app, ...)` hooks. If `:crank` runs after those compilers, the hooks register too late and topology enforcement is silently inert for the current pass. `mix crank.check` fails with `CRANK_SETUP_001` when the order is unsafe (Codex review #25 hardening, 2026-05-08).
+
+Use `[:crank | Mix.compilers()]` (or `[:crank] ++ Mix.compilers()`), never `Mix.compilers() ++ [:crank]`.
 
 ## What the starter Boundary config looks like
 
@@ -176,12 +182,12 @@ The OTP 26 pin is required — Crank's runtime tracing layer needs `:trace.sessi
 
 If you'd rather wire things by hand:
 
-1. Add `{:crank, "~> 1.2"}` and `{:boundary, "~> 0.10"}` to `deps`.
+1. Add `{:crank, "~> 2.0"}` and `{:boundary, "~> 0.10"}` to `deps`.
 2. Run `mix deps.get`.
 3. Add `:crank` to the `compilers:` list in `mix.exs`:
 
    ```elixir
-   compilers: Mix.compilers() ++ [:crank]
+   compilers: [:crank | Mix.compilers()]
    ```
 
 4. Create `config/boundary.exs` (or your equivalent) with the starter shape above.

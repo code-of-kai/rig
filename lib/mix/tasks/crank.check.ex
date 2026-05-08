@@ -78,20 +78,21 @@ defmodule Mix.Tasks.Crank.Check do
 
   @doc false
   def check_setup(opts) do
-    if crank_compiler_wired?() do
-      check_otp_version(opts)
-    else
-      violation =
-        Crank.Errors.build("CRANK_SETUP_001",
-          location: %{file: "mix.exs", line: nil},
-          context:
-            "`:crank` is not present in the project's `:compilers` list. Run `mix crank.gen.config` to wire it.",
-          metadata: %{}
-        )
+    case validate_compiler_position() do
+      :ok ->
+        check_otp_version(opts)
 
-      Mix.shell().info("")
-      Mix.shell().info(Crank.Errors.format_pretty(violation))
-      {:error, 1, "CRANK_SETUP_001"}
+      {:error, reason, context} ->
+        violation =
+          Crank.Errors.build("CRANK_SETUP_001",
+            location: %{file: "mix.exs", line: nil},
+            context: context,
+            metadata: %{reason: reason}
+          )
+
+        Mix.shell().info("")
+        Mix.shell().info(Crank.Errors.format_pretty(violation))
+        {:error, 1, "CRANK_SETUP_001"}
     end
   end
 
@@ -148,10 +149,45 @@ defmodule Mix.Tasks.Crank.Check do
 
   # ── helpers ────────────────────────────────────────────────────────────────
 
-  defp crank_compiler_wired? do
-    config = Mix.Project.config()
-    compilers = Keyword.get(config, :compilers, [])
-    :crank in compilers
+  # Validates that `:crank` is in the `:compilers` list AND positioned
+  # before `:elixir` and `:app`. The `Mix.Tasks.Compile.Crank.run/1`
+  # body registers `after_compiler(:elixir, ...)` and
+  # `after_compiler(:app, ...)` hooks; if `:crank` runs after either
+  # of them, the hooks register too late for the current compile pass
+  # and topology enforcement is silently inert.
+  #
+  # Codex review #25 (2026-05-08) flagged that the previous check
+  # only validated membership — projects with the docs-recommended
+  # but-now-known-wrong `Mix.compilers() ++ [:crank]` ordering would
+  # pass `mix crank.check` while topology checks didn't fire.
+  defp validate_compiler_position do
+    compilers = Mix.Project.config() |> Keyword.get(:compilers, [])
+
+    cond do
+      :crank not in compilers ->
+        {:error, :missing,
+         "`:crank` is not present in the project's `:compilers` list. Run `mix crank.gen.config` to wire it."}
+
+      crank_runs_after_elixir_or_app?(compilers) ->
+        {:error, :wrong_order,
+         "`:crank` is positioned AFTER `:elixir` or `:app` in `:compilers`. " <>
+           "The Crank compiler registers post-compile hooks; if it runs after those compilers, " <>
+           "the hooks register too late and topology enforcement is silently inert. " <>
+           "Use `[:crank | Mix.compilers()]` (prepend), not `Mix.compilers() ++ [:crank]` (append). " <>
+           "Current compilers: #{inspect(compilers)}"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp crank_runs_after_elixir_or_app?(compilers) do
+    crank_idx = Enum.find_index(compilers, &(&1 == :crank))
+    elixir_idx = Enum.find_index(compilers, &(&1 == :elixir))
+    app_idx = Enum.find_index(compilers, &(&1 == :app))
+
+    (elixir_idx != nil and crank_idx > elixir_idx) or
+      (app_idx != nil and crank_idx > app_idx)
   end
 
   defp dep_loaded?(app) do
