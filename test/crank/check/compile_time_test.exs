@@ -171,6 +171,72 @@ defmodule Crank.Check.CompileTimeTest do
       end
     end
 
+    test "malformed suppression (missing reason) fails compile with CRANK_META_001" do
+      # Codex review #28 (2026-05-08): meta-violations were parsed by
+      # `Suppressions.parse/1` but discarded by both compile-time and
+      # Credo paths. The catalog documented CRANK_META_001..004 but no
+      # check actually enforced them, so a malformed suppression
+      # silently accepted broken syntax. Now compile_time.ex prepends
+      # meta_violations to its violations list and raises on the first
+      # one — same pipeline as substantive violations.
+      module_source = """
+      defmodule CompileTimeTest.MalformedSuppression do
+        use Crank
+
+        @impl true
+        def start(_), do: {:ok, :idle, %{}}
+
+        @impl true
+        def turn(_event, :idle, memory) do
+          # crank-allow: CRANK_PURITY_004
+          # NOTE: missing required `# reason:` line — should fire CRANK_META_001
+          now = DateTime.utc_now()
+          {:next, :active, Map.put(memory, :now, now)}
+        end
+      end
+      """
+
+      path = Path.join(System.tmp_dir!(), "crank_meta_test_#{:erlang.unique_integer([:positive])}.ex")
+      File.write!(path, module_source)
+
+      try do
+        assert_raise CompileError, ~r/CRANK_META_001/, fn ->
+          Code.compile_file(path)
+        end
+      after
+        File.rm(path)
+      end
+    end
+
+    test "wrong-layer suppression (CRANK_DEP_*) fails compile with CRANK_META_004" do
+      module_source = """
+      defmodule CompileTimeTest.WrongLayerSuppression do
+        use Crank
+
+        @impl true
+        def start(_), do: {:ok, :idle, %{}}
+
+        @impl true
+        def turn(_event, :idle, memory) do
+          # crank-allow: CRANK_DEP_001
+          # reason: trying to suppress topology code at source layer
+          {:next, :active, memory}
+        end
+      end
+      """
+
+      path = Path.join(System.tmp_dir!(), "crank_meta_test_#{:erlang.unique_integer([:positive])}.ex")
+      File.write!(path, module_source)
+
+      try do
+        assert_raise CompileError, ~r/CRANK_META_004/, fn ->
+          Code.compile_file(path)
+        end
+      after
+        File.rm(path)
+      end
+    end
+
     test "non-Crank module is not subject to the check" do
       module_source = """
       defmodule CompileTimeTest.NotACrank do

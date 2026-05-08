@@ -54,25 +54,44 @@ if Code.ensure_loaded?(Credo.Check) and not Code.ensure_loaded?(Crank.Check.Turn
     def run(%SourceFile{} = source_file, params) do
       issue_meta = IssueMeta.for(source_file, params)
       source = SourceFile.source(source_file)
-      {suppressions, _meta} = Suppressions.parse(source)
+      {suppressions, meta} = Suppressions.parse(source)
 
+      # Codex review #28 (2026-05-08): meta_violations describe the
+      # suppression syntax itself and cannot be silenced by the table
+      # they're part of. They're carried through `visit/5` so that
+      # CRANK_META_* issues only fire on files containing a
+      # `use Crank` defmodule — otherwise heredoc-encoded test fixtures
+      # or documentation snippets that mention `# crank-allow:` would
+      # produce spurious issues despite no real suppression being
+      # active in those contexts.
       source_file
-      |> Credo.Code.prewalk(&visit(&1, &2, source_file, suppressions, issue_meta))
+      |> Credo.Code.prewalk(&visit(&1, &2, source_file, suppressions, meta, issue_meta))
+    end
+
+    defp build_meta_issues(meta_violations, issue_meta) do
+      Enum.map(meta_violations, fn %{code: code, line: line, message: message} ->
+        format_issue(issue_meta,
+          message: "[#{code}] #{message}",
+          line_no: line,
+          trigger: code
+        )
+      end)
     end
 
     # ── Visitor ─────────────────────────────────────────────────────────────
 
     # Only inspect defmodule blocks that `use Crank`.
-    defp visit({:defmodule, _meta, [_name, [do: body]]} = ast, issues, source_file, suppressions, issue_meta) do
+    defp visit({:defmodule, _meta, [_name, [do: body]]} = ast, issues, source_file, suppressions, meta, issue_meta) do
       if uses_crank?(body) do
+        meta_issues = build_meta_issues(meta, issue_meta)
         new_issues = collect_turn_issues(body, source_file, suppressions, issue_meta)
-        {ast, issues ++ new_issues}
+        {ast, issues ++ meta_issues ++ new_issues}
       else
         {ast, issues}
       end
     end
 
-    defp visit(ast, issues, _source_file, _suppressions, _issue_meta), do: {ast, issues}
+    defp visit(ast, issues, _source_file, _suppressions, _meta, _issue_meta), do: {ast, issues}
 
     # ── `use Crank` detector ────────────────────────────────────────────────
 

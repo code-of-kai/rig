@@ -228,10 +228,15 @@ defmodule Crank.PurityTrace do
   Finch, Req, Swoosh, Bamboo, Mailer, Oban, etc.) are derived from
   `Crank.Check.Blacklist.runtime_module_targets/0` and merged into the
   default list, so the static and runtime layers agree on canonical
-  infra names. User-aliased names (`MyApp.Repo`) are NOT covered by
-  default — pass them via `:forbidden_modules` from the test that
-  knows the application's surface, or rely on Boundary's topology
-  check for that case.
+  infra names. Prefix matchers (e.g. `{:prefix, "Ecto"}` in the static
+  blacklist) are expanded by walking `:code.all_loaded/0` at call time,
+  so submodules like `Ecto.Query`, `Ecto.Multi`, `Swoosh.Mailer.*` are
+  covered without manual opt-in (Codex review #28 fix).
+
+  User-aliased names (`MyApp.Repo`) are NOT covered by default — pass
+  them via `:forbidden_modules` from the test that knows the
+  application's surface, or rely on Boundary's topology check for
+  that case.
   """
   @spec default_forbidden_targets() :: [forbidden_target()]
   def default_forbidden_targets do
@@ -289,7 +294,32 @@ defmodule Crank.PurityTrace do
         {Kernel, :make_ref, 0},
         {:erlang, :make_ref, 0}
       ] ++
-      Blacklist.runtime_module_targets()
+      Blacklist.runtime_module_targets() ++
+      expand_prefix_targets()
+  end
+
+  # Expand prefix matchers (e.g. `{:prefix, "Ecto"}` from the static
+  # blacklist) into the set of currently-loaded submodules. The static
+  # layer covers `Ecto.Query.from/2` via prefix string-match on AST
+  # nodes; the runtime layer needs each loaded submodule registered as
+  # its own trace target because `:trace.function/4` matches by
+  # concrete module atom.
+  #
+  # We walk `:code.all_loaded/0` rather than scanning the file system
+  # or auto-loading modules — the latter would violate the v1 design
+  # principle of "no surprises at runtime". Modules not yet loaded
+  # cannot be called, so the gap is empty in practice.
+  @spec expand_prefix_targets() :: [module()]
+  defp expand_prefix_targets do
+    elixir_prefixes = Enum.map(Blacklist.runtime_prefix_targets(), &"Elixir.#{&1}")
+
+    for {mod, _} <- :code.all_loaded(),
+        mod_str = Atom.to_string(mod),
+        Enum.any?(elixir_prefixes, fn p ->
+          mod_str == p or String.starts_with?(mod_str, "#{p}.")
+        end),
+        uniq: true,
+        do: mod
   end
 
   # ── Worker process ────────────────────────────────────────────────────────

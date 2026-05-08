@@ -106,6 +106,26 @@ defmodule Crank.Suppressions do
   def suppressed?(_violation, _table), do: false
 
   @doc """
+  Converts the meta-violations returned by `parse/1` into proper
+  `Crank.Errors.Violation` structs so checks can thread them through
+  the same pipeline as substantive violations.
+
+  Codex review #28 (2026-05-08): callers previously discarded the
+  meta-violations list, leaving CRANK_META_001..004 cataloged but
+  unreachable in normal compile/credo flows. Suppression-syntax errors
+  now surface as compile or Credo issues alongside other violations.
+  """
+  @spec build_meta_violations(binary() | nil, [meta_violation()]) :: [Crank.Errors.Violation.t()]
+  def build_meta_violations(file, meta_violations) when is_list(meta_violations) do
+    Enum.map(meta_violations, fn %{code: code, line: line, message: message} ->
+      Crank.Errors.build(code,
+        location: %{file: file, line: line},
+        context: message
+      )
+    end)
+  end
+
+  @doc """
   Emits a `[:crank, :suppression]` telemetry event when a suppression silences
   a violation. Called by checks immediately before they discard a suppressed
   violation, so projects can audit suppression frequency.

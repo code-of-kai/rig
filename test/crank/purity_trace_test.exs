@@ -419,6 +419,24 @@ defmodule Crank.PurityTraceTest do
       end
     end
 
+    test "prefix-matched submodules are covered when loaded (Codex review #28)" do
+      # The static blacklist treats `{:prefix, "Logger"}` as covering
+      # `Logger`, `Logger.Formatter`, `Logger.Translator`, etc. Pre-fix
+      # the runtime layer collapsed prefixes to the root atom only, so
+      # a turn that called `Logger.Formatter.format/4` slipped past
+      # `assert_pure_turn` silently. The fix walks `:code.all_loaded/0`
+      # at trace setup and registers a trace pattern for each loaded
+      # submodule under each prefix.
+      Code.ensure_loaded!(Logger.Formatter)
+      defaults = PurityTrace.default_forbidden_targets()
+
+      assert Logger in defaults
+      assert Logger.Formatter in defaults
+
+      # Module not under any prefix MUST NOT leak in.
+      refute Kernel in defaults
+    end
+
     test "blacklist runtime_module_targets returns the prefix/module subset" do
       # Pinning the derivation so a regression in Blacklist.runtime_module_targets/0
       # is caught here too, not just by the integration path through PurityTrace.

@@ -222,6 +222,32 @@ defmodule Crank.Check.Blacklist do
   @spec runtime_module_targets() :: [module()]
   def runtime_module_targets, do: @runtime_module_targets
 
+  # Prefix matchers, exposed separately so `Crank.PurityTrace` can expand
+  # them against `:code.all_loaded()` at trace-session setup. The static
+  # blacklist treats `{:prefix, "Ecto"}` as covering `Ecto.Query`,
+  # `Ecto.Multi`, etc.; the runtime layer needs the same transitive
+  # coverage to avoid false-clean verdicts on submodule calls.
+  #
+  # Codex review #28 (2026-05-08): prior `runtime_module_targets/0`
+  # collapsed prefixes to a single root atom (`Ecto`), so calls into
+  # `Ecto.Query.from/2` were not caught by default — only manual
+  # `:forbidden_modules` opt-in, which contradicts the documented
+  # alignment between static and runtime layers.
+  @runtime_prefix_targets (Enum.map(@entries, fn
+                             %{matcher: {:prefix, name}} -> name
+                             _ -> nil
+                           end)
+                           |> Enum.reject(&is_nil/1)
+                           |> Enum.uniq())
+
+  @doc """
+  Returns the prefix strings whose runtime trace coverage requires
+  expansion against currently-loaded modules at trace-session setup
+  time. See `runtime_module_targets/0` for the canonical-atom subset.
+  """
+  @spec runtime_prefix_targets() :: [binary()]
+  def runtime_prefix_targets, do: @runtime_prefix_targets
+
   @doc """
   Checks whether a remote call AST node matches any blacklist entry.
 

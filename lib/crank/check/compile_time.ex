@@ -26,17 +26,23 @@ defmodule Crank.Check.CompileTime do
 
     turn_bodies = Module.get_attribute(module, :__crank_turn_bodies__) || []
 
-    suppressions =
+    {suppressions, meta_violations} =
       case File.read(file) do
         {:ok, source} ->
-          {table, _meta} = Suppressions.parse(source)
-          table
+          {table, meta} = Suppressions.parse(source)
+          # Codex review #28 (2026-05-08): meta-violations
+          # (CRANK_META_001..004) describe malformed suppression
+          # annotations themselves and CANNOT be suppressed by the
+          # very table they're part of. Surface them as proper
+          # violations so the user sees a CompileError instead of
+          # silently accepting the broken suppression.
+          {table, Suppressions.build_meta_violations(file, meta)}
 
         _ ->
-          %{}
+          {%{}, []}
       end
 
-    violations = check_turn_bodies(turn_bodies, file, suppressions)
+    violations = meta_violations ++ check_turn_bodies(turn_bodies, file, suppressions)
 
     case violations do
       [] ->
