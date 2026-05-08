@@ -189,7 +189,18 @@ defmodule Crank.PurityTrace do
 
     try do
       # Step 3 — Set forbidden patterns (session-scoped; no global state).
-      Enum.each(forbidden, &set_pattern(session, &1))
+      # Pre-load any unloaded targets in the user's own process to
+      # avoid blocking the Coordinator on `:code_server.call`. Then
+      # batch every `:trace.function/4` invocation into ONE Coordinator
+      # round-trip — under parallel property tests with ~50 prefix-
+      # expanded targets, per-target round-trips saturate the
+      # Coordinator's mailbox and ExUnit's 60s property timeout fires
+      # before the trace session is even fully armed (CI run 25584531644).
+      Enum.each(forbidden, &preload_target/1)
+
+      Coordinator.exec(fn ->
+        Enum.each(forbidden, &arm_pattern(session, &1))
+      end)
 
       # Step 4 — Attach the trace to the worker. `:arity` keeps trace
       # messages bounded — we want MFA identity, not arg values.
@@ -374,32 +385,15 @@ defmodule Crank.PurityTrace do
 
   # ── Pattern setup ─────────────────────────────────────────────────────────
 
-  defp set_pattern(session, mod) when is_atom(mod) do
-    # `:trace.function/4` returns 0 if the matched module isn't loaded yet,
-    # silently no-op'ing the pattern. Force the module to load so the trace
-    # actually arms — Elixir's lazy module loading would otherwise cause
-    # false-negative pure verdicts on the first call to a fresh module.
-    #
-    # Use `:erlang.module_loaded/1` (BIF, no code_server roundtrip) before
-    # falling back to `Code.ensure_loaded/1`. The fallback path goes through
-    # the global code_server, which serialises every call across the BEAM.
-    # Under parallel property tests with many prefix-expanded targets the
-    # round-trip cost dominates and saturates the server. CI with the OTP-26
-    # → 27 fix surfaced this as a 60s timeout in `set_pattern/2`.
-    ensure_loaded_fast(mod)
-
-    Coordinator.exec(fn ->
-      :trace.function(session, {mod, :_, :_}, true, [])
-    end)
-  end
-
-  defp set_pattern(session, {m, f, a}) when is_atom(m) and is_atom(f) do
-    ensure_loaded_fast(m)
-
-    Coordinator.exec(fn ->
-      :trace.function(session, {m, f, a}, true, [])
-    end)
-  end
+  # Split into (a) `preload_target` — runs in the caller's process,
+  # uses `:erlang.module_loaded/1` (BIF, no roundtrip) before falling
+  # back to `Code.ensure_loaded/1`; and (b) `arm_pattern` — runs inside
+  # a single batched Coordinator call, just the cheap `:trace.function/4`
+  # invocation. `:trace.function/4` returns 0 silently if the module
+  # isn't loaded yet, so preloading is required to actually arm the
+  # pattern.
+  defp preload_target(mod) when is_atom(mod), do: ensure_loaded_fast(mod)
+  defp preload_target({m, _, _}) when is_atom(m), do: ensure_loaded_fast(m)
 
   defp ensure_loaded_fast(mod) do
     if :erlang.module_loaded(mod) do
@@ -408,6 +402,14 @@ defmodule Crank.PurityTrace do
       _ = Code.ensure_loaded(mod)
       :ok
     end
+  end
+
+  defp arm_pattern(session, mod) when is_atom(mod) do
+    :trace.function(session, {mod, :_, :_}, true, [])
+  end
+
+  defp arm_pattern(session, {m, f, a}) when is_atom(m) and is_atom(f) do
+    :trace.function(session, {m, f, a}, true, [])
   end
 
   # ── Collection loop ───────────────────────────────────────────────────────

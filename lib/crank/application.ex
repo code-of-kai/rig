@@ -59,17 +59,7 @@ defmodule Crank.Application do
   """
   @spec otp_release() :: non_neg_integer()
   def otp_release do
-    # Defensive: `:erlang.system_info(:otp_release)` returns a charlist
-    # on all current OTP releases, but exotic emulator builds have been
-    # observed returning a binary. Handle both shapes so an unusual
-    # consumer build doesn't crash boot.
-    case :erlang.system_info(:otp_release) do
-      release when is_list(release) ->
-        release |> List.to_string() |> String.to_integer()
-
-      release when is_binary(release) ->
-        String.to_integer(release)
-    end
+    :erlang.system_info(:otp_release) |> List.to_string() |> String.to_integer()
   end
 
   @doc """
