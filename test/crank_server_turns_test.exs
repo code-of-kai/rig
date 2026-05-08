@@ -837,17 +837,61 @@ defmodule Crank.Server.TurnsTest do
       assert frame.line == 42
     end
 
-    test "top_stack_frames/2 handles 3-tuple anonymous-function frames" do
-      anon = fn -> :ok end
+    test "top_stack_frames/2 handles 3-tuple anonymous-function frames without leaking the fun term" do
+      # Codex review #18 (2026-05-08): the previous version
+      # emitted the raw `fun` term as `function:`. Anonymous
+      # functions capture their lexical environment;
+      # `:erlang.term_to_binary` on the fun reveals the captures.
+      # This redaction extracts only `:module` and `:name` from
+      # `:erlang.fun_info/1`, preserving diagnostics without
+      # leaking captures.
+      secret = "sekret-token-#{System.unique_integer([:positive])}"
+      anon = fn -> secret end
       stack = [{anon, [:arg1, :arg2], [file: ~c"nofile", line: 1]}]
 
       assert [frame] = ServerTurns.top_stack_frames(stack, 5)
-      assert frame.module == nil
-      assert frame.function == anon
-      # arity normalised from arg-list length
+      assert is_atom(frame.module)
+      assert is_atom(frame.function)
       assert frame.arity == 2
       assert frame.file == ~c"nofile"
       assert frame.line == 1
+
+      # Critical: NO field in the frame map contains a function
+      # term (which would carry captured environment), and no
+      # field's binary representation contains the secret string.
+      refute Enum.any?(Map.values(frame), &is_function/1),
+             "expected no function value in frame, got: #{inspect(frame)}"
+
+      bytes = :erlang.term_to_binary(frame)
+      refute :binary.match(bytes, secret) != :nomatch,
+             "secret string leaked into frame metadata"
+    end
+
+    test "top_stack_frames/2 never emits raw fun terms across mixed stacktraces" do
+      # Defensive sweep: build a stacktrace mixing 4-tuple and
+      # 3-tuple entries with anonymous functions carrying
+      # different captured values; assert none survive into the
+      # output.
+      secret_a = "alpha-secret-#{System.unique_integer([:positive])}"
+      secret_b = "beta-secret-#{System.unique_integer([:positive])}"
+      fun_a = fn -> secret_a end
+      fun_b = fn -> secret_b end
+
+      stack = [
+        {Foo, :bar, 1, [file: ~c"a.ex", line: 1]},
+        {fun_a, [:x], [file: ~c"b.ex", line: 2]},
+        {fun_b, 2, [file: ~c"c.ex", line: 3]}
+      ]
+
+      frames = ServerTurns.top_stack_frames(stack, 10)
+
+      for frame <- frames do
+        refute Enum.any?(Map.values(frame), &is_function/1)
+
+        bytes = :erlang.term_to_binary(frame)
+        refute :binary.match(bytes, secret_a) != :nomatch
+        refute :binary.match(bytes, secret_b) != :nomatch
+      end
     end
 
     test "top_stack_frames/2 falls back gracefully on unknown frame shapes" do

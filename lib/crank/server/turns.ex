@@ -259,11 +259,21 @@ defmodule Crank.Server.Turns do
     }
   end
 
+  # Extract `:module` and `:name` from the fun via `:erlang.fun_info/1`
+  # rather than emitting the raw fun term. A fun term carries its
+  # captured lexical environment — `:erlang.term_to_binary(fn -> secret end)`
+  # contains the captured value bytes — so forwarding it to telemetry
+  # sinks would leak runtime state to downstream APMs/log forwarders.
+  # `fun_info` returns the synthesized fun identifier (e.g.
+  # `:"-host_fn/2-anon-0-"`) and the parent module, which preserve
+  # diagnostic value without the captures.
   defp format_frame({fun, arity_or_args, location})
        when is_function(fun) and is_list(location) do
+    info = :erlang.fun_info(fun)
+
     %{
-      module: nil,
-      function: fun,
+      module: Keyword.get(info, :module),
+      function: Keyword.get(info, :name),
       arity: normalize_arity(arity_or_args),
       file: Keyword.get(location, :file),
       line: Keyword.get(location, :line)
