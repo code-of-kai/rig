@@ -791,6 +791,50 @@ defmodule Crank.Server.TurnsTest do
       end
     end
 
+    # Codex review #20 (2026-05-08): the previous truncation used
+    # `binary_part/3` and could cut mid-codepoint, producing
+    # invalid UTF-8. JSON serializers in telemetry handlers crash
+    # on invalid UTF-8, and Telemetry detaches the handler —
+    # silencing the observability we just added. Fix walks
+    # codepoints; output is always valid UTF-8 by construction.
+    test "safe_run/2 truncates multibyte messages without producing invalid UTF-8" do
+      handler_id = "test-cleanup-utf8-#{System.unique_integer()}"
+      parent = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:crank, :server_turns, :cleanup_failure],
+        fn _name, _measurements, metadata, _config ->
+          send(parent, {:cleanup_failure, metadata})
+        end,
+        nil
+      )
+
+      try do
+        # Build a message that's >500 bytes worth of `€` (3 bytes
+        # each in UTF-8). Truncation must NOT cut mid-codepoint.
+        # 200 € chars = 600 bytes, so truncation at 500 will land
+        # mid-codepoint with the byte-based approach.
+        big_msg = String.duplicate("€", 200)
+
+        :ok = ServerTurns.safe_run(:test_utf8, fn -> raise ArgumentError, big_msg end)
+
+        assert_receive {:cleanup_failure, metadata}, 100
+
+        # Critical: the truncated message must be valid UTF-8.
+        assert String.valid?(metadata.message),
+               "expected valid UTF-8, got bytes: #{inspect(metadata.message, binaries: :as_binaries)}"
+
+        # And it must end with the ellipsis (truncation marker).
+        assert String.ends_with?(metadata.message, "…")
+
+        # And byte size must respect the bound.
+        assert byte_size(metadata.message) <= 510
+      after
+        :telemetry.detach(handler_id)
+      end
+    end
+
     test "safe_run/2 truncates oversized exception messages" do
       handler_id = "test-cleanup-trunc-#{System.unique_integer()}"
       parent = self()

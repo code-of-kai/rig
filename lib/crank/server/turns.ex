@@ -220,8 +220,35 @@ defmodule Crank.Server.Turns do
   defp bounded_message(:exit, reason), do: truncate(inspect(reason), @max_message_chars)
   defp bounded_message(_, reason), do: truncate(inspect(reason), @max_message_chars)
 
-  defp truncate(s, max) when byte_size(s) <= max, do: s
-  defp truncate(s, max), do: binary_part(s, 0, max) <> "…"
+  defp truncate(s, max_bytes) when byte_size(s) <= max_bytes, do: s
+
+  # Codex review #20 (2026-05-08): `binary_part/3` cuts at byte
+  # boundaries and would produce invalid UTF-8 if the cut landed
+  # mid-codepoint. Telemetry handlers serialising metadata to
+  # JSON/log sinks crash on invalid UTF-8, and Telemetry then
+  # detaches the failing handler — killing the very observability
+  # the cleanup_failure event was meant to provide.
+  #
+  # Walk codepoints, accumulating until the next one would exceed
+  # the byte budget. Output is always valid UTF-8 by construction.
+  defp truncate(s, max_bytes) do
+    truncate_to_bytes(s, max_bytes, <<>>) <> "…"
+  end
+
+  defp truncate_to_bytes(<<>>, _max, acc), do: acc
+
+  defp truncate_to_bytes(<<c::utf8, rest::binary>>, max, acc) do
+    candidate = <<acc::binary, c::utf8>>
+
+    if byte_size(candidate) > max do
+      acc
+    else
+      truncate_to_bytes(rest, max, candidate)
+    end
+  end
+
+  # Fallback for malformed UTF-8: stop at whatever's already valid.
+  defp truncate_to_bytes(_invalid_remainder, _max, acc), do: acc
 
   @doc """
   Truncates an Erlang stacktrace to the top `count` frames and
