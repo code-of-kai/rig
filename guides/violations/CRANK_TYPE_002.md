@@ -2,7 +2,16 @@
 
 ## What triggers this
 
-A typespec for `@type memory/0` (or for a state struct used in the state union) contains `function/0`, `module/0`, or any concrete function/MFA type. Crank's macro form rejects these at compile time.
+A typespec for `@type memory/0` (or for a state struct used in the state union) contains `function/0`, `module/0`, or any concrete function/MFA type. Crank's macro form rejects these at compile time **when the memory module's typespec is on disk for the host module's `@after_compile` hook**.
+
+### Best-effort under compile order
+
+If the memory module hasn't been written to BEAM bytecode by the time the host module finishes compiling (typical of cross-file forward references in a single mix project), the check is skipped at compile time and `[:crank, :typing, :memory_check_deferred]` telemetry fires. Mitigation:
+
+1. Reorder build files so the memory module compiles first — Elixir handles this automatically when the host `alias`-imports the memory module, but raw `use Crank, memory: SomeForwardRef` may not get the right ordering.
+2. Run `mix compile` twice — the second pass sees the memory module's bytecode and the check fires correctly.
+
+A deterministic post-compile second pass via `mix crank.check` is tracked on [ROADMAP](../../ROADMAP.md) for v2.x.
 
 ```elixir
 use Crank,

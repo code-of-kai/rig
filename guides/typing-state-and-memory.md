@@ -163,7 +163,7 @@ The type discipline is laid out so each successive choice activates more enforce
 | Atomic states (`:idle`, `:running`) | Pattern-matching only. No type help. |
 | Struct-per-state (`%Idle{}`, `%Running{}`) | Field-name validation by the Elixir compiler. |
 | Typespecs on each state struct | Dialyzer warnings on misuse. |
-| `use Crank, states: [...], memory: M` | Closed-union return check; function/module/pid rejected in memory. |
+| `use Crank, states: [...], memory: M` | Closed-union return check; function/module/pid rejected in memory at compile time when the memory module's typespec is on disk for the host module's `@after_compile` hook (otherwise emits `[:crank, :typing, :memory_check_deferred]` telemetry — see [CRANK_TYPE_002](violations/CRANK_TYPE_002.md)). |
 | Closed event unions (future) | Compile-time exhaustiveness on `turn/3`. |
 
 You can stop at any rung. Crank doesn't require the macro form. But every step up adds enforcement that costs you nothing at runtime and saves a class of bugs that would otherwise show up in production.
