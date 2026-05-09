@@ -312,11 +312,40 @@ defmodule Crank.PurityTrace do
   # or auto-loading modules — the latter would violate the v1 design
   # principle of "no surprises at runtime". Modules not yet loaded
   # cannot be called, so the gap is empty in practice.
+  #
+  # Cached via `:persistent_term`, keyed by the count of currently-
+  # loaded modules. The walk + filter is otherwise re-run on every
+  # `trace_pure/2` call, which under parallel property tests on slow
+  # CI runners (and combined with the Coordinator GenServer) was the
+  # dominant cost driving ExUnit's 60s property-test timeout.
+  # Invalidation: the loaded-module count changes when new modules
+  # come into the BEAM. The key compares cheaply; recompute only on
+  # mismatch. Not perfectly fingerprinted (two equally-large but
+  # different sets compare equal), but `:code.all_loaded/0` only
+  # grows during normal test runs — modules don't unload — so an
+  # equal-count match means equal sets in practice.
+  @cache_key {__MODULE__, :expanded_prefix_targets}
+
   @spec expand_prefix_targets() :: [module()]
   defp expand_prefix_targets do
+    loaded = :code.all_loaded()
+    count = length(loaded)
+
+    case :persistent_term.get(@cache_key, :miss) do
+      {^count, cached} ->
+        cached
+
+      _ ->
+        targets = compute_prefix_targets(loaded)
+        :persistent_term.put(@cache_key, {count, targets})
+        targets
+    end
+  end
+
+  defp compute_prefix_targets(loaded) do
     elixir_prefixes = Enum.map(Blacklist.runtime_prefix_targets(), &"Elixir.#{&1}")
 
-    for {mod, _} <- :code.all_loaded(),
+    for {mod, _} <- loaded,
         mod_str = Atom.to_string(mod),
         Enum.any?(elixir_prefixes, fn p ->
           mod_str == p or String.starts_with?(mod_str, "#{p}.")

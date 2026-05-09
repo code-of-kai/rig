@@ -15,6 +15,12 @@ defmodule Crank.Property.ExamplesPurityTest do
   import Crank.PropertyTest
 
   @moduletag :property
+  # Each iteration goes through the BEAM trace API (serialised by
+  # `Crank.PurityTrace.Coordinator` for thread-safety). Slow CI
+  # runners need more headroom than ExUnit's default 60s; bumping
+  # to 180s avoids spurious flakes. Local typically completes well
+  # under the default.
+  @moduletag timeout: 180_000
 
   # Property runs deliberately small — runtime tracing is heavy. The static
   # layer + the unit tests in property_test_test.exs already give us deep

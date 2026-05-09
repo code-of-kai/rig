@@ -37,6 +37,12 @@ defmodule Crank.PropertyTestTest do
     end
   end
 
+  # Property tests funnel every iteration through `Crank.PurityTrace.Coordinator`
+  # (the GenServer that serialises BEAM trace API calls for thread-safety).
+  # Under parallel async ExUnit and slow CI runners, the per-iteration overhead
+  # adds up — bump the per-test ExUnit timeout from the default 60s to 180s so
+  # a slow runner has headroom. Local runs typically complete in under 2s.
+  @tag timeout: 180_000
   property "Turnstile is pure under any random event sequence" do
     check all(
             events <-
