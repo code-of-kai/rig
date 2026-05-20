@@ -171,15 +171,13 @@ A GenServer with `handle_call` clauses that check `state.status` is an implicit 
 
 José Valim's consistent advice: start simple, promote to complex when needed. Plain functions before GenServer. GenServer before `:gen_statem`.
 
-Crank's pure mode is simpler than GenServer. `Crank.turn(machine, event)` is a function call that returns a struct. No `start_link`. No mailbox. No supervision tree. No process lifecycle.
+Pure mode is **machine-as-data**: a `%Crank{}` is plain immutable data, like `%Date{}` — no PID, no mailbox, no lifecycle. It lives in whatever process holds it: a Phoenix request, a LiveView, a test, an `Enum.reduce`. Every line of Elixir still runs in *some* process; what pure mode removes is a process *dedicated to the machine*. `Crank.Server` is **machine-as-process**: one `:gen_statem` per machine, with mailbox, real timers, supervision. Same callback module, different holder.
 
 ```
-Pure function  (Crank.turn/2)
+machine-as-data  (Crank.turn/2)
        ↓  promotion when you need supervision, timeouts, telemetry
-gen_statem process  (Crank.Server)
+machine-as-process  (Crank.Server)
 ```
-
-The promotion path is built in. Same module, different caller.
 
 ## Struct-per-state
 
